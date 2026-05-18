@@ -36,8 +36,11 @@ const WS_READY_STATE_CLOSING = 2;
 const CONNECT_TIMEOUT_MS = 10000;
 const PROXY_REQUIRED_SUFFIXES = [
     'openai.com', 'chatgpt.com', 'oaistatic.com', 'oaiusercontent.com', 'openaiapi.com',
+    'chat.openai.com', 'auth0.openai.com',
+    'challenges.cloudflare.com', 'turnstile.com',
     'anthropic.com', 'claude.ai', 'ai.google.dev', 'gemini.google.com', 'bard.google.com',
     'generativelanguage.googleapis.com', 'alkalimakersuite-pa.clients6.google.com',
+    'accounts.google.com',
     'copilot.microsoft.com', 'githubcopilot.com',
     'cursor.sh', 'cursor.com', 'api2.cursor.sh',
 ];
@@ -159,9 +162,13 @@ function requiresProxyHost(hostname) {
 }
 
 function resolveProxyList(customProxyIP) {
-    if (customProxyIP) return [String(customProxyIP).trim()].filter(Boolean);
-    if (proxyIPList.length) return proxyIPList;
-    return proxyIP.split(',').map(s => s.trim()).filter(Boolean);
+    const all = proxyIPList.length
+        ? [...proxyIPList]
+        : proxyIP.split(',').map(s => s.trim()).filter(Boolean);
+    if (!customProxyIP) return all;
+    const first = String(customProxyIP).trim();
+    if (!first) return all;
+    return [first, ...all.filter((p) => p !== first)];
 }
 
 function isGlobalOutboundProxy(proxyStr) {
@@ -263,6 +270,17 @@ function wantsHtmlSubscriptionPage(request, url) {
     return accept.includes('text/html');
 }
 
+function getPrimaryProxyIP() {
+    return proxyIPList[0] || proxyIP.split(',')[0].trim();
+}
+
+/** 订阅节点 WS 路径（内置 proxyip，确保 OpenAI 登录 API 走解锁 IP） */
+function buildWsPathEncoded() {
+    const primary = getPrimaryProxyIP();
+    if (!primary) return '%2F%3Fed%3D2560';
+    return encodeURIComponent(`/?ed=2560&proxyip=${primary}`);
+}
+
 function buildNodeLinks(currentDomain) {
     const vlsHeader = 'v' + 'l' + 'e' + 's' + 's';
     const troHeader = 't' + 'r' + 'o' + 'j' + 'a' + 'n';
@@ -288,20 +306,26 @@ function buildNodeLinks(currentDomain) {
         return { host, port, nodeName };
     };
 
-    const vlsLinks = cfip.map((item) => {
+    const wsPathDefault = '%2F%3Fed%3D2560';
+    const wsPathAI = buildWsPathEncoded();
+
+    const makeLinks = (header, wsPath, suffix) => cfip.map((item) => {
         const { host, port, nodeName } = parseCdn(item);
-        const name = nodeName ? `${nodeName}-${vlsHeader}` : `Workers-${vlsHeader}`;
-        return `${vlsHeader}://${yourUUID}@${host}:${port}?encryption=none&security=tls&sni=${currentDomain}&fp=firefox&allowInsecure=0&type=ws&host=${currentDomain}&path=%2F%3Fed%3D2560#${name}`;
+        const name = nodeName ? `${nodeName}-${header}${suffix}` : `Workers-${header}${suffix}`;
+        const q = header === vlsHeader
+            ? `encryption=none&security=tls&sni=${currentDomain}&fp=firefox&allowInsecure=0&type=ws&host=${currentDomain}&path=${wsPath}`
+            : `security=tls&sni=${currentDomain}&fp=firefox&allowInsecure=0&type=ws&host=${currentDomain}&path=${wsPath}`;
+        return `${header}://${yourUUID}@${host}:${port}?${q}#${name}`;
     });
 
-    if (disabletro) return vlsLinks;
+    const vlsNormal = makeLinks(vlsHeader, wsPathDefault, '');
+    const vlsAI = makeLinks(vlsHeader, wsPathAI, '-AI');
+    let allLinks = [...vlsNormal, ...vlsAI];
 
-    const troLinks = cfip.map((item) => {
-        const { host, port, nodeName } = parseCdn(item);
-        const name = nodeName ? `${nodeName}-${troHeader}` : `Workers-${troHeader}`;
-        return `${troHeader}://${yourUUID}@${host}:${port}?security=tls&sni=${currentDomain}&fp=firefox&allowInsecure=0&type=ws&host=${currentDomain}&path=%2F%3Fed%3D2560#${name}`;
-    });
-    return [...vlsLinks, ...troLinks];
+    if (!disabletro) {
+        allLinks = [...allLinks, ...makeLinks(troHeader, wsPathDefault, ''), ...makeLinks(troHeader, wsPathAI, '-AI')];
+    }
+    return allLinks;
 }
 
 function getSubGuideHTML(currentDomain, subUrl) {
