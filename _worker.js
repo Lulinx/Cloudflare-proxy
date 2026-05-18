@@ -8,17 +8,29 @@ import { connect } from 'cloudflare:sockets';
 
 let subPath = 'link';     // 节点订阅路径,不修改将使用uuid作为订阅路径
 let password = '123456';  // 主页密码,建议修改或添加 PASSWORD环境变量
-let proxyIP = 'proxy.xxxxxxxx.tk:50001';  // proxyIP 格式：ip、域名、ip:port、域名:port等,没填写port，默认使用443
+// 多 proxyIP 逗号分隔，依次故障转移；用于解锁 OpenAI / ChatGPT 等
+let proxyIP = 'proxyip.us.fxxk.dedyn.io,proxyip.sg.fxxk.dedyn.io,13.230.34.30';
+let proxyIPList = [];
 let yourUUID = '5dc15e15-f285-4a9d-959b-0e4fbdd77b63'; // UUID,建议修改或添加环境便量
 let disabletro = false;  // 是否关闭trojan, 设置为true时关闭，false开启 
 
-// CDN 
-let cfip = [ // 格式:优选域名:端口#备注名称、优选IP:端口#备注名称、[ipv6优选]:端口#备注名称、优选域名#备注 
-    'mfa.gov.ua#SG', 'saas.sin.fan#HK', 'store.ubi.com#JP','cf.130519.xyz#KR','cf.008500.xyz#HK', 
-    'cf.090227.xyz#SG', 'cf.877774.xyz#HK','cdns.doon.eu.org#JP','sub.danfeng.eu.org#TW','cf.zhetengsha.eu.org#HK'
-];  // 在此感谢各位大佬维护的优选域名
+// CDN 优选（定期可在社区更新列表）
+let cfip = [
+    'cdnhk.huabuxiang.vip#HK', 'hk.100366.xyz#HK', '443.xiangmq1969.xyz#JP',
+    'yx.kkkong.pp.ua#US', 'cip.951535.xyz#CF', 'cf.130519.xyz#KR',
+    'cf.008500.xyz#HK', 'cf.090227.xyz#SG', 'cf.877774.xyz#HK',
+    'cdns.doon.eu.org#JP', 'sub.danfeng.eu.org#TW'
+];
 const WS_READY_STATE_OPEN = 1;
 const WS_READY_STATE_CLOSING = 2;
+const CONNECT_TIMEOUT_MS = 10000;
+const PROXY_REQUIRED_SUFFIXES = [
+    'openai.com', 'chatgpt.com', 'oaistatic.com', 'oaiusercontent.com', 'openaiapi.com',
+    'anthropic.com', 'claude.ai', 'ai.google.dev', 'gemini.google.com', 'bard.google.com',
+    'generativelanguage.googleapis.com', 'alkalimakersuite-pa.clients6.google.com',
+    'copilot.microsoft.com', 'githubcopilot.com',
+    'cursor.sh', 'cursor.com', 'api2.cursor.sh',
+];
 function closeSocketQuietly(socket) { 
     try { 
         if (socket.readyState === WS_READY_STATE_OPEN || socket.readyState === WS_READY_STATE_CLOSING) {
@@ -127,6 +139,42 @@ function isSpeedTestSite(hostname) {
     return false;
 }
 
+function requiresProxyHost(hostname) {
+    if (!hostname) return false;
+    const h = hostname.toLowerCase();
+    for (const suffix of PROXY_REQUIRED_SUFFIXES) {
+        if (h === suffix || h.endsWith('.' + suffix)) return true;
+    }
+    return false;
+}
+
+function resolveProxyList(customProxyIP) {
+    if (customProxyIP) return [String(customProxyIP).trim()].filter(Boolean);
+    if (proxyIPList.length) return proxyIPList;
+    return proxyIP.split(',').map(s => s.trim()).filter(Boolean);
+}
+
+function isGlobalOutboundProxy(proxyStr) {
+    const cfg = parsePryAddress(proxyStr);
+    return cfg && (cfg.type === 'socks5' || cfg.type === 'http' || cfg.type === 'https');
+}
+
+async function connectWithTimeout(hostname, port, data) {
+    const remoteSock = connect({ hostname, port });
+    await Promise.race([
+        remoteSock.opened,
+        new Promise((_, reject) =>
+            setTimeout(() => reject(new Error(`connect timeout: ${hostname}:${port}`)), CONNECT_TIMEOUT_MS)
+        ),
+    ]);
+    if (data) {
+        const writer = remoteSock.writable.getWriter();
+        await writer.write(data);
+        writer.releaseLock();
+    }
+    return remoteSock;
+}
+
 async function sha224(text) {
   const encoder = new TextEncoder();
   const data = encoder.encode(text);
@@ -214,8 +262,11 @@ export default {
 			}
 
             if (env.PROXYIP || env.proxyip || env.proxyIP) {
-                const servers = (env.PROXYIP || env.proxyip || env.proxyIP).split(',').map(s => s.trim());
-                proxyIP = servers[0]; 
+                const servers = (env.PROXYIP || env.proxyip || env.proxyIP).split(',').map(s => s.trim()).filter(Boolean);
+                proxyIP = servers.join(',');
+                proxyIPList = servers;
+            } else {
+                proxyIPList = proxyIP.split(',').map(s => s.trim()).filter(Boolean);
             }
             password = env.PASSWORD || env.PASSWD || env.password || password;
             subPath = env.SUB_PATH || env.subpath || subPath;
@@ -619,59 +670,48 @@ async function connect2Http(proxyConfig, targetHost, targetPort, initialData) {
 }
 
 async function forwardataTCP(host, portNum, rawData, ws, respHeader, remoteConnWrapper, customProxyIP) {
-    async function connectDirect(address, port, data) {
-        const remoteSock = connect({ hostname: address, port: port });
-        const writer = remoteSock.writable.getWriter();
-        await writer.write(data);
-        writer.releaseLock();
-        return remoteSock;
-    }
-    
-    let proxyConfig = null;
-    let shouldUseProxy = false;
-    if (customProxyIP) {
-        proxyConfig = parsePryAddress(customProxyIP);
-        if (proxyConfig && (proxyConfig.type === 'socks5' || proxyConfig.type === 'http' || proxyConfig.type === 'https')) {
-            shouldUseProxy = true;
-        } else if (!proxyConfig) {
-            proxyConfig = parsePryAddress(proxyIP) || { type: 'direct', host: proxyIP, port: 443 };
-        }
-    } else {
-        proxyConfig = parsePryAddress(proxyIP) || { type: 'direct', host: proxyIP, port: 443 };
-        if (proxyConfig.type === 'socks5' || proxyConfig.type === 'http' || proxyConfig.type === 'https') {
-            shouldUseProxy = true;
-        }
-    }
-    
-    async function connecttoPry() {
-        let newSocket;
+    const proxyList = resolveProxyList(customProxyIP);
+    const mustUseProxy = requiresProxyHost(host);
+    const forceAllViaProxy = customProxyIP && isGlobalOutboundProxy(customProxyIP);
+
+    async function connectSingleProxy(proxyStr) {
+        const proxyConfig = parsePryAddress(proxyStr) || { type: 'direct', host: proxyStr, port: 443 };
         if (proxyConfig.type === 'socks5') {
-            newSocket = await connect2Socks5(proxyConfig, host, portNum, rawData);
-        } else if (proxyConfig.type === 'http' || proxyConfig.type === 'https') {
-            newSocket = await connect2Http(proxyConfig, host, portNum, rawData);
-        } else {
-            newSocket = await connectDirect(proxyConfig.host, proxyConfig.port, rawData);
+            return await connect2Socks5(proxyConfig, host, portNum, rawData);
         }
-        
-        remoteConnWrapper.socket = newSocket;
-        newSocket.closed.catch(() => {}).finally(() => closeSocketQuietly(ws));
-        connectStreams(newSocket, ws, respHeader, null);
+        if (proxyConfig.type === 'http' || proxyConfig.type === 'https') {
+            return await connect2Http(proxyConfig, host, portNum, rawData);
+        }
+        return await connectWithTimeout(proxyConfig.host, proxyConfig.port, rawData);
     }
-    
-    if (shouldUseProxy) {
-        try {
-            await connecttoPry();
-        } catch (err) {
-            throw err;
+
+    async function connectViaProxy() {
+        let lastError = null;
+        for (const p of proxyList) {
+            try {
+                const newSocket = await connectSingleProxy(p);
+                remoteConnWrapper.socket = newSocket;
+                newSocket.closed.catch(() => {}).finally(() => closeSocketQuietly(ws));
+                connectStreams(newSocket, ws, respHeader, null);
+                return;
+            } catch (err) {
+                lastError = err;
+            }
         }
-    } else {
-        try {
-            const initialSocket = await connectDirect(host, portNum, rawData);
-            remoteConnWrapper.socket = initialSocket;
-            connectStreams(initialSocket, ws, respHeader, connecttoPry);
-        } catch (err) {
-            await connecttoPry();
-        }
+        throw lastError || new Error('All proxy endpoints failed');
+    }
+
+    if (mustUseProxy || forceAllViaProxy || (proxyList.length && proxyList.every(isGlobalOutboundProxy))) {
+        await connectViaProxy();
+        return;
+    }
+
+    try {
+        const initialSocket = await connectWithTimeout(host, portNum, rawData);
+        remoteConnWrapper.socket = initialSocket;
+        connectStreams(initialSocket, ws, respHeader, connectViaProxy);
+    } catch (err) {
+        await connectViaProxy();
     }
 }
 
