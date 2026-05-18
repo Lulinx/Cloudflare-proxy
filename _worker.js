@@ -152,33 +152,40 @@ function isSpeedTestSite(hostname) {
     return false;
 }
 
-/** 必须 CF 直连，禁止走 proxyIP（否则 TLS 报错 ERR_SSL_VERSION_OR_CIPHER_MISMATCH） */
-const DIRECT_PREFERRED_SUFFIXES = [
-    'auth.openai.com', 'auth0.openai.com',
+/** Google OAuth：只能 CF 直连，禁止 proxyIP（否则 ERR_SSL_VERSION_OR_CIPHER_MISMATCH） */
+const DIRECT_ONLY_SUFFIXES = [
     'google.com', 'googleapis.com', 'gstatic.com', 'googleusercontent.com', 'ggpht.com',
 ];
 
-function prefersDirectConnect(hostname) {
+/** OpenAI 登录/OAuth（含 /oauth/authorize、Codex CLI）：直连优先，失败再回退 proxyIP */
+const DIRECT_FIRST_SUFFIXES = ['auth.openai.com', 'auth0.openai.com'];
+
+function hostMatchesSuffixList(hostname, suffixList) {
     if (!hostname) return false;
     const h = hostname.toLowerCase();
-    for (const suffix of DIRECT_PREFERRED_SUFFIXES) {
+    for (const suffix of suffixList) {
         if (h === suffix || h.endsWith('.' + suffix)) return true;
     }
     return false;
+}
+
+function isDirectOnlyHost(hostname) {
+    return hostMatchesSuffixList(hostname, DIRECT_ONLY_SUFFIXES);
+}
+
+function isDirectFirstHost(hostname) {
+    return hostMatchesSuffixList(hostname, DIRECT_FIRST_SUFFIXES);
 }
 
 function requiresProxyHost(hostname) {
-    if (!hostname) return false;
-    if (prefersDirectConnect(hostname)) return false;
-    const h = hostname.toLowerCase();
-    for (const suffix of PROXY_REQUIRED_SUFFIXES) {
-        if (h === suffix || h.endsWith('.' + suffix)) return true;
-    }
-    return false;
+    if (isDirectOnlyHost(hostname) || isDirectFirstHost(hostname)) return false;
+    return hostMatchesSuffixList(hostname, PROXY_REQUIRED_SUFFIXES);
 }
 
 function connectTimeoutMs(hostname) {
-    return prefersDirectConnect(hostname) ? AUTH_CONNECT_TIMEOUT_MS : CONNECT_TIMEOUT_MS;
+    return (isDirectOnlyHost(hostname) || isDirectFirstHost(hostname))
+        ? AUTH_CONNECT_TIMEOUT_MS
+        : CONNECT_TIMEOUT_MS;
 }
 
 function resolveProxyList(customProxyIP) {
@@ -768,7 +775,7 @@ async function forwardataTCP(host, portNum, rawData, ws, respHeader, remoteConnW
         return;
     }
 
-    const directOnly = prefersDirectConnect(host);
+    const directOnly = isDirectOnlyHost(host);
     const timeout = connectTimeoutMs(host);
     try {
         const initialSocket = await connectWithTimeout(host, portNum, rawData, timeout);
