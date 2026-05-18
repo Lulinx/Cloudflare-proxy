@@ -157,8 +157,8 @@ const DIRECT_ONLY_SUFFIXES = [
     'google.com', 'googleapis.com', 'gstatic.com', 'googleusercontent.com', 'ggpht.com',
 ];
 
-/** OpenAI 登录/OAuth（含 /oauth/authorize、Codex CLI）：直连优先，失败再回退 proxyIP */
-const DIRECT_FIRST_SUFFIXES = ['auth.openai.com', 'auth0.openai.com'];
+/** OpenAI 认证全路径（log-in、oauth/authorize、log-in-or-create-account、Codex CLI）：国内 proxy 优先，直连兜底 */
+const AUTH_PROXY_FIRST_SUFFIXES = ['auth.openai.com', 'auth0.openai.com'];
 
 function hostMatchesSuffixList(hostname, suffixList) {
     if (!hostname) return false;
@@ -173,17 +173,17 @@ function isDirectOnlyHost(hostname) {
     return hostMatchesSuffixList(hostname, DIRECT_ONLY_SUFFIXES);
 }
 
-function isDirectFirstHost(hostname) {
-    return hostMatchesSuffixList(hostname, DIRECT_FIRST_SUFFIXES);
+function isAuthProxyFirstHost(hostname) {
+    return hostMatchesSuffixList(hostname, AUTH_PROXY_FIRST_SUFFIXES);
 }
 
 function requiresProxyHost(hostname) {
-    if (isDirectOnlyHost(hostname) || isDirectFirstHost(hostname)) return false;
+    if (isDirectOnlyHost(hostname) || isAuthProxyFirstHost(hostname)) return false;
     return hostMatchesSuffixList(hostname, PROXY_REQUIRED_SUFFIXES);
 }
 
 function connectTimeoutMs(hostname) {
-    return (isDirectOnlyHost(hostname) || isDirectFirstHost(hostname))
+    return (isDirectOnlyHost(hostname) || isAuthProxyFirstHost(hostname))
         ? AUTH_CONNECT_TIMEOUT_MS
         : CONNECT_TIMEOUT_MS;
 }
@@ -770,23 +770,40 @@ async function forwardataTCP(host, portNum, rawData, ws, respHeader, remoteConnW
         throw lastError || new Error('All proxy endpoints failed');
     }
 
+    async function connectViaDirect(timeoutMs, streamRetry) {
+        const initialSocket = await connectWithTimeout(host, portNum, rawData, timeoutMs);
+        remoteConnWrapper.socket = initialSocket;
+        connectStreams(initialSocket, ws, respHeader, streamRetry);
+    }
+
+    // Google：仅 CF 直连
+    if (isDirectOnlyHost(host)) {
+        await connectViaDirect(AUTH_CONNECT_TIMEOUT_MS, null);
+        return;
+    }
+
+    // OpenAI 认证：proxyIP 优先（多地址故障转移），直连兜底
+    if (isAuthProxyFirstHost(host) && !forceAllViaProxy) {
+        try {
+            await connectViaProxy();
+            return;
+        } catch {
+            await connectViaDirect(AUTH_CONNECT_TIMEOUT_MS, null);
+            return;
+        }
+    }
+
+    // ChatGPT / API：强制 proxyIP
     if (mustUseProxy || forceAllViaProxy || (proxyList.length && proxyList.every(isGlobalOutboundProxy))) {
         await connectViaProxy();
         return;
     }
 
-    const directOnly = isDirectOnlyHost(host);
-    const timeout = connectTimeoutMs(host);
+    // 其他站点：直连优先，proxy 兜底
     try {
-        const initialSocket = await connectWithTimeout(host, portNum, rawData, timeout);
-        remoteConnWrapper.socket = initialSocket;
-        connectStreams(initialSocket, ws, respHeader, directOnly ? null : connectViaProxy);
+        await connectViaDirect(CONNECT_TIMEOUT_MS, connectViaProxy);
     } catch (err) {
-        if (!directOnly) {
-            await connectViaProxy();
-        } else {
-            throw err;
-        }
+        await connectViaProxy();
     }
 }
 
