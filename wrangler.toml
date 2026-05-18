@@ -2,8 +2,13 @@ name = "v2ray-proxy"
 compatibility_date = "2024-12-02"
 pages_build_output_dir = "."
 
-[vars]
-# 在 Cloudflare Dashboard → Settings → Variables 中覆盖以下值更安全
-# PASSWORD = "your_web_password"
-# UUID = "your-uuid-here"
+# 配置说明（与 _worker.js 顶部 DEFAULT_CONFIG 保持一致）：
+# 1. 推荐只改 _worker.js 里的 DEFAULT_CONFIG，然后 deploy
+# 2. 若启用下方 [vars]，部署后会写入 Dashboard「明文变量」，可随时查看/编辑
+# 3. 请删除 Dashboard 里的「密钥 Secret」，否则会覆盖且无法查看
+# 4. wrangler.toml 里注释掉的 [vars] 不会生效；要启用请去掉行首 #
+
+# [vars]
+# PASSWORD = "11111111"
+# UUID = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
 # PROXYIP = "proxyip.us.fxxk.dedyn.io,proxyip.sg.fxxk.dedyn.io,13.230.34.30"

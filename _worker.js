@@ -6,13 +6,23 @@
 
 import { connect } from 'cloudflare:sockets';
 
-let subPath = 'link';     // 节点订阅路径,不修改将使用uuid作为订阅路径
-let password = '123456';  // 主页密码,建议修改或添加 PASSWORD环境变量
-// 多 proxyIP 逗号分隔，依次故障转移；用于解锁 OpenAI / ChatGPT 等
-let proxyIP = 'proxyip.us.fxxk.dedyn.io,proxyip.sg.fxxk.dedyn.io,13.230.34.30';
+// ========== 主配置（改这里后重新 deploy；与 wrangler.toml [vars] 保持一致）==========
+// Dashboard 里若还有 Secret，会覆盖这里的值；建议删除 Secret，只用本配置或明文 Variable
+const DEFAULT_CONFIG = {
+    password: '11111111',
+    uuid: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+    proxyIP: 'proxyip.us.fxxk.dedyn.io,proxyip.sg.fxxk.dedyn.io,13.230.34.30',
+    disableTrojan: false,
+};
+
+let subPath = 'link';
+let password = DEFAULT_CONFIG.password;
+let proxyIP = DEFAULT_CONFIG.proxyIP;
 let proxyIPList = [];
-let yourUUID = '5dc15e15-f285-4a9d-959b-0e4fbdd77b63'; // UUID,建议修改或添加环境便量
-let disabletro = false;  // 是否关闭trojan, 设置为true时关闭，false开启 
+let yourUUID = DEFAULT_CONFIG.uuid;
+let disabletro = DEFAULT_CONFIG.disableTrojan;
+let sessionToken = '';
+const SESSION_COOKIE = 'cf_proxy_auth';
 
 // CDN 优选（定期可在社区更新列表）
 let cfip = [
@@ -247,6 +257,59 @@ function rightRotate(value, amount) {
   return (value >>> amount) | (value << (32 - amount));
 }
 
+function wantsHtmlSubscriptionPage(request, url) {
+    if (url.searchParams.get('view') === 'html' || url.searchParams.get('html') === '1') return true;
+    const accept = request.headers.get('Accept') || '';
+    return accept.includes('text/html');
+}
+
+function buildNodeLinks(currentDomain) {
+    const vlsHeader = 'v' + 'l' + 'e' + 's' + 's';
+    const troHeader = 't' + 'r' + 'o' + 'j' + 'a' + 'n';
+
+    const parseCdn = (cdnItem) => {
+        let host, port = 443, nodeName = '';
+        if (cdnItem.includes('#')) {
+            const parts = cdnItem.split('#');
+            cdnItem = parts[0];
+            nodeName = parts[1];
+        }
+        if (cdnItem.startsWith('[') && cdnItem.includes(']:')) {
+            const ipv6End = cdnItem.indexOf(']:');
+            host = cdnItem.substring(0, ipv6End + 1);
+            port = parseInt(cdnItem.substring(ipv6End + 2), 10) || 443;
+        } else if (cdnItem.includes(':')) {
+            const parts = cdnItem.split(':');
+            host = parts[0];
+            port = parseInt(parts[1], 10) || 443;
+        } else {
+            host = cdnItem;
+        }
+        return { host, port, nodeName };
+    };
+
+    const vlsLinks = cfip.map((item) => {
+        const { host, port, nodeName } = parseCdn(item);
+        const name = nodeName ? `${nodeName}-${vlsHeader}` : `Workers-${vlsHeader}`;
+        return `${vlsHeader}://${yourUUID}@${host}:${port}?encryption=none&security=tls&sni=${currentDomain}&fp=firefox&allowInsecure=0&type=ws&host=${currentDomain}&path=%2F%3Fed%3D2560#${name}`;
+    });
+
+    if (disabletro) return vlsLinks;
+
+    const troLinks = cfip.map((item) => {
+        const { host, port, nodeName } = parseCdn(item);
+        const name = nodeName ? `${nodeName}-${troHeader}` : `Workers-${troHeader}`;
+        return `${troHeader}://${yourUUID}@${host}:${port}?security=tls&sni=${currentDomain}&fp=firefox&allowInsecure=0&type=ws&host=${currentDomain}&path=%2F%3Fed%3D2560#${name}`;
+    });
+    return [...vlsLinks, ...troLinks];
+}
+
+function getSubGuideHTML(currentDomain, subUrl) {
+    const clashUrl = `https://sublink.eooce.com/clash?config=${subUrl}`;
+    const singboxUrl = `https://sublink.eooce.com/singbox?config=${subUrl}`;
+    return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>订阅中心</title><style>body{font-family:system-ui,sans-serif;background:linear-gradient(135deg,#66ead7,#9461c8);min-height:100vh;margin:0;padding:20px}.box{max-width:720px;margin:0 auto;background:#fff;border-radius:12px;padding:24px;box-shadow:0 10px 30px rgba(0,0,0,.15)}h1{color:#4c51bf;font-size:1.4rem}p{color:#555;line-height:1.6}.tip{background:#fff9e6;border-left:4px solid #f6ad55;padding:12px;margin:16px 0;font-size:14px}code{background:#f1f5f9;padding:2px 6px;border-radius:4px;word-break:break-all}.row{margin:12px 0}.label{font-weight:600;color:#333;margin-bottom:6px}.url{display:block;background:#f7fafc;border:1px solid #e2e8f0;padding:10px;border-radius:6px;font-size:13px;word-break:break-all}a{color:#5a67d8}</style></head><body><div class="box"><h1>订阅中心</h1><div class="tip"><strong>说明：</strong>用浏览器打开本页是正常的。客户端订阅请复制下方「V2rayN 订阅地址」；若只看到乱码，请访问 <a href="${subUrl}?view=html">带说明的页面</a> 或给订阅 URL 加 <code>?view=html</code>。</div><p>管理页（需密码）：<a href="https://${currentDomain}/">https://${currentDomain}/</a></p><div class="row"><div class="label">V2rayN / 小火箭 订阅地址</div><code class="url">${subUrl}</code></div><div class="row"><div class="label">Clash 订阅</div><code class="url">${clashUrl}</code></div><div class="row"><div class="label">Sing-box 订阅</div><code class="url">${singboxUrl}</code></div><p style="font-size:13px;color:#888">节点 UUID：<code>${yourUUID}</code> · OpenAI 流量将自动走 PROXYIP</p></div></body></html>`;
+}
+
 export default {
 	/**
 	 * @param {import("@cloudflare/workers-types").Request} request
@@ -257,10 +320,6 @@ export default {
     async fetch(request, env, ctx) {
         try {
 
-			if (subPath === 'link' || subPath === '') {
-				subPath = yourUUID;
-			}
-
             if (env.PROXYIP || env.proxyip || env.proxyIP) {
                 const servers = (env.PROXYIP || env.proxyip || env.proxyIP).split(',').map(s => s.trim()).filter(Boolean);
                 proxyIP = servers.join(',');
@@ -269,9 +328,13 @@ export default {
                 proxyIPList = proxyIP.split(',').map(s => s.trim()).filter(Boolean);
             }
             password = env.PASSWORD || env.PASSWD || env.password || password;
-            subPath = env.SUB_PATH || env.subpath || subPath;
             yourUUID = env.UUID || env.uuid || yourUUID;
+            subPath = env.SUB_PATH || env.subpath || subPath;
+            if (subPath === 'link' || subPath === '') {
+                subPath = yourUUID;
+            }
             disabletro = env.DISABLE_TROJAN || env.CLOSE_TROJAN || disabletro;
+            sessionToken = await sha224(password + ':cf-proxy-session');
             
             const url = new URL(request.url);
             const pathname = url.pathname;
@@ -309,73 +372,28 @@ export default {
                 return await handleVlsRequest(request, customProxyIP);
             } else if (request.method === 'GET') {
                 if (url.pathname === '/') {
-                    return getHomePage(request);
+                    if (url.searchParams.get('logout') === '1') {
+                        return clearSessionCookie(getLoginPage(url.hostname, `https://${url.hostname}`, false));
+                    }
+                    return await getHomePage(request);
                 }
                 
-                if (url.pathname.toLowerCase().includes(`/${subPath.toLowerCase()}`)) {
+                const subPathLower = `/${subPath.toLowerCase()}`;
+                if (url.pathname.toLowerCase() === subPathLower || url.pathname.toLowerCase() === `${subPathLower}/`) {
                     const currentDomain = url.hostname;
-                    const vlsHeader = 'v' + 'l' + 'e' + 's' + 's';
-                    const troHeader = 't' + 'r' + 'o' + 'j' + 'a' + 'n';
-                    
-                    // 生成 VLE-SS 节点
-                    const vlsLinks = cfip.map(cdnItem => {
-                        let host, port = 443, nodeName = '';
-                        if (cdnItem.includes('#')) {
-                            const parts = cdnItem.split('#');
-                            cdnItem = parts[0];
-                            nodeName = parts[1];
-                        }
-
-                        if (cdnItem.startsWith('[') && cdnItem.includes(']:')) {
-                            const ipv6End = cdnItem.indexOf(']:');
-                            host = cdnItem.substring(0, ipv6End + 1); 
-                            const portStr = cdnItem.substring(ipv6End + 2); 
-                            port = parseInt(portStr) || 443;
-                        } else if (cdnItem.includes(':')) {
-                            const parts = cdnItem.split(':');
-                            host = parts[0];
-                            port = parseInt(parts[1]) || 443;
-                        } else {
-                            host = cdnItem;
-                        }
-                        
-                        const vlsNodeName = nodeName ? `${nodeName}-${vlsHeader}` : `Workers-${vlsHeader}`;
-                        return `${vlsHeader}://${yourUUID}@${host}:${port}?encryption=none&security=tls&sni=${currentDomain}&fp=firefox&allowInsecure=0&type=ws&host=${currentDomain}&path=%2F%3Fed%3D2560#${vlsNodeName}`;
-                    });
-                    
-                    // 生成 Tro-jan 节点
-                    let allLinks = [...vlsLinks];
-                    if (!disabletro) {
-                        const troLinks = cfip.map(cdnItem => {
-                            let host, port = 443, nodeName = '';
-                            if (cdnItem.includes('#')) {
-                                const parts = cdnItem.split('#');
-                                cdnItem = parts[0];
-                                nodeName = parts[1];
-                            }
-
-                            if (cdnItem.startsWith('[') && cdnItem.includes(']:')) {
-                                const ipv6End = cdnItem.indexOf(']:');
-                                host = cdnItem.substring(0, ipv6End + 1); 
-                                const portStr = cdnItem.substring(ipv6End + 2); 
-                                port = parseInt(portStr) || 443;
-                            } else if (cdnItem.includes(':')) {
-                                const parts = cdnItem.split(':');
-                                host = parts[0];
-                                port = parseInt(parts[1]) || 443;
-                            } else {
-                                host = cdnItem;
-                            }
-                            
-                            const troNodeName = nodeName ? `${nodeName}-${troHeader}` : `Workers-${troHeader}`;
-                            return `${troHeader}://${yourUUID}@${host}:${port}?security=tls&sni=${currentDomain}&fp=firefox&allowInsecure=0&type=ws&host=${currentDomain}&path=%2F%3Fed%3D2560#${troNodeName}`;
+                    const subUrl = `https://${currentDomain}/${subPath}`;
+                    if (wantsHtmlSubscriptionPage(request, url)) {
+                        return new Response(getSubGuideHTML(currentDomain, subUrl), {
+                            headers: {
+                                'Content-Type': 'text/html; charset=utf-8',
+                                'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+                            },
                         });
-                        allLinks = [...vlsLinks, ...troLinks];
                     }
-                    const linksText = allLinks.join('\n');
+                    const linksText = buildNodeLinks(currentDomain).join('\n');
                     const base64Content = btoa(unescape(encodeURIComponent(linksText)));
                     return new Response(base64Content, {
-                        headers: { 
+                        headers: {
                             'Content-Type': 'text/plain; charset=utf-8',
                             'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
                         },
@@ -842,23 +860,49 @@ async function forwardataudp(udpChunk, webSocket, respHeader) {
     }
 }
 
+function parseCookies(cookieHeader) {
+	const out = {};
+	if (!cookieHeader) return out;
+	for (const part of cookieHeader.split(';')) {
+		const [k, ...v] = part.trim().split('=');
+		if (k) out[k] = decodeURIComponent(v.join('='));
+	}
+	return out;
+}
+
+function withSessionCookie(response) {
+	const headers = new Headers(response.headers);
+	headers.set('Set-Cookie', `${SESSION_COOKIE}=${sessionToken}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=604800`);
+	return new Response(response.body, { status: response.status, headers });
+}
+
+function clearSessionCookie(response) {
+	const headers = new Headers(response.headers);
+	headers.set('Set-Cookie', `${SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`);
+	return new Response(response.body, { status: response.status, headers });
+}
+
 /**
  * @param {import("@cloudflare/workers-types").Request} request
- * @returns {Response}
+ * @returns {Promise<Response>}
  */
-function getHomePage(request) {
-	const url = request.headers.get('Host');
-	const baseUrl = `https://${url}`;
+async function getHomePage(request) {
+	const host = request.headers.get('Host') || new URL(request.url).hostname;
+	const baseUrl = `https://${host}`;
 	const urlObj = new URL(request.url);
 	const providedPassword = urlObj.searchParams.get('password');
+	const cookies = parseCookies(request.headers.get('Cookie'));
+
 	if (providedPassword) {
 		if (providedPassword === password) {
-			return getMainPageContent(url, baseUrl);
-		} else {
-			return getLoginPage(url, baseUrl, true);
+			return withSessionCookie(getMainPageContent(host, baseUrl));
 		}
+		return getLoginPage(host, baseUrl, true);
 	}
-	return getLoginPage(url, baseUrl, false);
+	if (sessionToken && cookies[SESSION_COOKIE] === sessionToken) {
+		return getMainPageContent(host, baseUrl);
+	}
+	return getLoginPage(host, baseUrl, false);
 }
 
 /**
@@ -1549,9 +1593,7 @@ function getMainPageContent(url, baseUrl) {
         
         function logout() {
             if (confirm('确定要退出登录吗?')) {
-                const currentUrl = new URL(window.location);
-                currentUrl.searchParams.delete('password');
-                window.location.href = currentUrl.toString();
+                window.location.href = '/?logout=1';
             }
         }
     </script>
