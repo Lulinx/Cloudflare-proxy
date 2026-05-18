@@ -41,7 +41,6 @@ const PROXY_REQUIRED_SUFFIXES = [
     'challenges.cloudflare.com', 'turnstile.com',
     'anthropic.com', 'claude.ai', 'ai.google.dev', 'gemini.google.com', 'bard.google.com',
     'generativelanguage.googleapis.com', 'alkalimakersuite-pa.clients6.google.com',
-    'accounts.google.com',
     'copilot.microsoft.com', 'githubcopilot.com',
     'cursor.sh', 'cursor.com', 'api2.cursor.sh',
 ];
@@ -153,8 +152,11 @@ function isSpeedTestSite(hostname) {
     return false;
 }
 
-/** 登录认证域：经 CF 直连通常比 proxyIP 更快，避免 Operation timed out */
-const DIRECT_PREFERRED_SUFFIXES = ['auth.openai.com', 'auth0.openai.com'];
+/** 必须 CF 直连，禁止走 proxyIP（否则 TLS 报错 ERR_SSL_VERSION_OR_CIPHER_MISMATCH） */
+const DIRECT_PREFERRED_SUFFIXES = [
+    'auth.openai.com', 'auth0.openai.com',
+    'google.com', 'googleapis.com', 'gstatic.com', 'googleusercontent.com', 'ggpht.com',
+];
 
 function prefersDirectConnect(hostname) {
     if (!hostname) return false;
@@ -766,13 +768,18 @@ async function forwardataTCP(host, portNum, rawData, ws, respHeader, remoteConnW
         return;
     }
 
+    const directOnly = prefersDirectConnect(host);
     const timeout = connectTimeoutMs(host);
     try {
         const initialSocket = await connectWithTimeout(host, portNum, rawData, timeout);
         remoteConnWrapper.socket = initialSocket;
-        connectStreams(initialSocket, ws, respHeader, connectViaProxy);
+        connectStreams(initialSocket, ws, respHeader, directOnly ? null : connectViaProxy);
     } catch (err) {
-        await connectViaProxy();
+        if (!directOnly) {
+            await connectViaProxy();
+        } else {
+            throw err;
+        }
     }
 }
 
