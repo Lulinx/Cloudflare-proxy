@@ -33,7 +33,8 @@ let cfip = [
 ];
 const WS_READY_STATE_OPEN = 1;
 const WS_READY_STATE_CLOSING = 2;
-const CONNECT_TIMEOUT_MS = 10000;
+const CONNECT_TIMEOUT_MS = 20000;
+const AUTH_CONNECT_TIMEOUT_MS = 30000;
 const PROXY_REQUIRED_SUFFIXES = [
     'openai.com', 'chatgpt.com', 'oaistatic.com', 'oaiusercontent.com', 'openaiapi.com',
     'chat.openai.com', 'auth0.openai.com',
@@ -152,13 +153,30 @@ function isSpeedTestSite(hostname) {
     return false;
 }
 
+/** 登录认证域：经 CF 直连通常比 proxyIP 更快，避免 Operation timed out */
+const DIRECT_PREFERRED_SUFFIXES = ['auth.openai.com', 'auth0.openai.com'];
+
+function prefersDirectConnect(hostname) {
+    if (!hostname) return false;
+    const h = hostname.toLowerCase();
+    for (const suffix of DIRECT_PREFERRED_SUFFIXES) {
+        if (h === suffix || h.endsWith('.' + suffix)) return true;
+    }
+    return false;
+}
+
 function requiresProxyHost(hostname) {
     if (!hostname) return false;
+    if (prefersDirectConnect(hostname)) return false;
     const h = hostname.toLowerCase();
     for (const suffix of PROXY_REQUIRED_SUFFIXES) {
         if (h === suffix || h.endsWith('.' + suffix)) return true;
     }
     return false;
+}
+
+function connectTimeoutMs(hostname) {
+    return prefersDirectConnect(hostname) ? AUTH_CONNECT_TIMEOUT_MS : CONNECT_TIMEOUT_MS;
 }
 
 function resolveProxyList(customProxyIP) {
@@ -176,12 +194,12 @@ function isGlobalOutboundProxy(proxyStr) {
     return cfg && (cfg.type === 'socks5' || cfg.type === 'http' || cfg.type === 'https');
 }
 
-async function connectWithTimeout(hostname, port, data) {
+async function connectWithTimeout(hostname, port, data, timeoutMs = CONNECT_TIMEOUT_MS) {
     const remoteSock = connect({ hostname, port });
     await Promise.race([
         remoteSock.opened,
         new Promise((_, reject) =>
-            setTimeout(() => reject(new Error(`connect timeout: ${hostname}:${port}`)), CONNECT_TIMEOUT_MS)
+            setTimeout(() => reject(new Error(`connect timeout: ${hostname}:${port}`)), timeoutMs)
         ),
     ]);
     if (data) {
@@ -724,7 +742,7 @@ async function forwardataTCP(host, portNum, rawData, ws, respHeader, remoteConnW
         if (proxyConfig.type === 'http' || proxyConfig.type === 'https') {
             return await connect2Http(proxyConfig, host, portNum, rawData);
         }
-        return await connectWithTimeout(proxyConfig.host, proxyConfig.port, rawData);
+        return await connectWithTimeout(proxyConfig.host, proxyConfig.port, rawData, connectTimeoutMs(host));
     }
 
     async function connectViaProxy() {
@@ -748,8 +766,9 @@ async function forwardataTCP(host, portNum, rawData, ws, respHeader, remoteConnW
         return;
     }
 
+    const timeout = connectTimeoutMs(host);
     try {
-        const initialSocket = await connectWithTimeout(host, portNum, rawData);
+        const initialSocket = await connectWithTimeout(host, portNum, rawData, timeout);
         remoteConnWrapper.socket = initialSocket;
         connectStreams(initialSocket, ws, respHeader, connectViaProxy);
     } catch (err) {
