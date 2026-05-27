@@ -11,7 +11,8 @@ import { connect } from 'cloudflare:sockets';
 const DEFAULT_CONFIG = {
     password: '11111111',
     uuid: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
-    proxyIP: 'proxyip.us.fxxk.dedyn.io,proxyip.sg.fxxk.dedyn.io,13.230.34.30',
+    // 美国解锁 IP 优先；去掉不稳定线路，减少 OpenAI/Gemini 连接失败
+    proxyIP: 'proxyip.us.fxxk.dedyn.io,13.230.34.30',
     disableTrojan: false,
 };
 
@@ -24,12 +25,11 @@ let disabletro = DEFAULT_CONFIG.disableTrojan;
 let sessionToken = '';
 const SESSION_COOKIE = 'cf_proxy_auth';
 
-// CDN 优选（定期可在社区更新列表）
+// CDN 优选（仅保留美国线路；订阅时会自动把 Worker 域名作为首节点）
 let cfip = [
-    'cdnhk.huabuxiang.vip#HK', 'hk.100366.xyz#HK', '443.xiangmq1969.xyz#JP',
-    'yx.kkkong.pp.ua#US', 'cip.951535.xyz#CF', 'cf.130519.xyz#KR',
-    'cf.008500.xyz#HK', 'cf.090227.xyz#SG', 'cf.877774.xyz#HK',
-    'cdns.doon.eu.org#JP', 'sub.danfeng.eu.org#TW'
+    'yx.kkkong.pp.ua#US-1',
+    'www.visa.com#US-2',
+    'time.cloudflare.com#US-3',
 ];
 const WS_READY_STATE_OPEN = 1;
 const WS_READY_STATE_CLOSING = 2;
@@ -38,9 +38,8 @@ const AUTH_CONNECT_TIMEOUT_MS = 30000;
 const PROXY_REQUIRED_SUFFIXES = [
     'openai.com', 'chatgpt.com', 'oaistatic.com', 'oaiusercontent.com', 'openaiapi.com',
     'chat.openai.com', 'auth0.openai.com',
-    'challenges.cloudflare.com', 'turnstile.com',
     'anthropic.com', 'claude.ai', 'ai.google.dev', 'gemini.google.com', 'bard.google.com',
-    'generativelanguage.googleapis.com', 'alkalimakersuite-pa.clients6.google.com',
+    'googleapis.com', 'generativelanguage.googleapis.com', 'alkalimakersuite-pa.clients6.google.com',
     'copilot.microsoft.com', 'githubcopilot.com',
     'cursor.sh', 'cursor.com', 'api2.cursor.sh',
 ];
@@ -152,9 +151,17 @@ function isSpeedTestSite(hostname) {
     return false;
 }
 
-/** Google OAuth：只能 CF 直连，禁止 proxyIP（否则 ERR_SSL_VERSION_OR_CIPHER_MISMATCH） */
+/** CF 控制台 / Turnstile：必须 Workers 直连，走 proxyIP 会触发人机验证且无法登录 */
+const CLOUDFLARE_DIRECT_SUFFIXES = [
+    'cloudflare.com', 'cloudflare.net', 'cloudflare-dns.com', 'cloudflarestatus.com',
+    'cloudflareinsights.com', 'workers.dev', 'pages.dev', 'turnstile.com',
+];
+
+/** Google OAuth 登录页：仅这些域名 CF 直连（避免 SSL 握手错误）；Gemini/API 走 PROXYIP */
 const DIRECT_ONLY_SUFFIXES = [
-    'google.com', 'googleapis.com', 'gstatic.com', 'googleusercontent.com', 'ggpht.com',
+    ...CLOUDFLARE_DIRECT_SUFFIXES,
+    'accounts.google.com', 'oauth2.googleapis.com', 'oauthaccountmanager.googleapis.com',
+    'gstatic.com', 'googleusercontent.com', 'ggpht.com',
 ];
 
 /** OpenAI 认证全路径（log-in、oauth/authorize、log-in-or-create-account、Codex CLI）：国内 proxy 优先，直连兜底 */
@@ -336,7 +343,10 @@ function buildNodeLinks(currentDomain) {
     const wsPathDefault = '%2F%3Fed%3D2560';
     const wsPathAI = buildWsPathEncoded();
 
-    const makeLinks = (header, wsPath, suffix) => cfip.map((item) => {
+    // 首节点用 Worker 自定义域名，最稳定，避免社区 CDN 失效导致测速 -1
+    const cdnEntries = [`${currentDomain}#Workers-稳定`, ...cfip];
+
+    const makeLinks = (header, wsPath, suffix) => cdnEntries.map((item) => {
         const { host, port, nodeName } = parseCdn(item);
         const name = nodeName ? `${nodeName}-${header}${suffix}` : `Workers-${header}${suffix}`;
         const q = header === vlsHeader
@@ -358,7 +368,7 @@ function buildNodeLinks(currentDomain) {
 function getSubGuideHTML(currentDomain, subUrl) {
     const clashUrl = `https://sublink.eooce.com/clash?config=${subUrl}`;
     const singboxUrl = `https://sublink.eooce.com/singbox?config=${subUrl}`;
-    return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>订阅中心</title><style>body{font-family:system-ui,sans-serif;background:linear-gradient(135deg,#66ead7,#9461c8);min-height:100vh;margin:0;padding:20px}.box{max-width:720px;margin:0 auto;background:#fff;border-radius:12px;padding:24px;box-shadow:0 10px 30px rgba(0,0,0,.15)}h1{color:#4c51bf;font-size:1.4rem}p{color:#555;line-height:1.6}.tip{background:#fff9e6;border-left:4px solid #f6ad55;padding:12px;margin:16px 0;font-size:14px}code{background:#f1f5f9;padding:2px 6px;border-radius:4px;word-break:break-all}.row{margin:12px 0}.label{font-weight:600;color:#333;margin-bottom:6px}.url{display:block;background:#f7fafc;border:1px solid #e2e8f0;padding:10px;border-radius:6px;font-size:13px;word-break:break-all}a{color:#5a67d8}</style></head><body><div class="box"><h1>订阅中心</h1><div class="tip"><strong>说明：</strong>用浏览器打开本页是正常的。客户端订阅请复制下方「V2rayN 订阅地址」；若只看到乱码，请访问 <a href="${subUrl}?view=html">带说明的页面</a> 或给订阅 URL 加 <code>?view=html</code>。</div><p>管理页（需密码）：<a href="https://${currentDomain}/">https://${currentDomain}/</a></p><div class="row"><div class="label">V2rayN / 小火箭 订阅地址</div><code class="url">${subUrl}</code></div><div class="row"><div class="label">Clash 订阅</div><code class="url">${clashUrl}</code></div><div class="row"><div class="label">Sing-box 订阅</div><code class="url">${singboxUrl}</code></div><p style="font-size:13px;color:#888">节点 UUID：<code>${yourUUID}</code> · OpenAI 流量将自动走 PROXYIP</p></div></body></html>`;
+    return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>订阅中心</title><style>body{font-family:system-ui,sans-serif;background:linear-gradient(135deg,#66ead7,#9461c8);min-height:100vh;margin:0;padding:20px}.box{max-width:720px;margin:0 auto;background:#fff;border-radius:12px;padding:24px;box-shadow:0 10px 30px rgba(0,0,0,.15)}h1{color:#4c51bf;font-size:1.4rem}p{color:#555;line-height:1.6}.tip{background:#fff9e6;border-left:4px solid #f6ad55;padding:12px;margin:16px 0;font-size:14px}code{background:#f1f5f9;padding:2px 6px;border-radius:4px;word-break:break-all}.row{margin:12px 0}.label{font-weight:600;color:#333;margin-bottom:6px}.url{display:block;background:#f7fafc;border:1px solid #e2e8f0;padding:10px;border-radius:6px;font-size:13px;word-break:break-all}a{color:#5a67d8}</style></head><body><div class="box"><h1>订阅中心</h1><div class="tip"><strong>说明：</strong>用浏览器打开本页是正常的。客户端订阅请复制下方「V2rayN 订阅地址」；若只看到乱码，请访问 <a href="${subUrl}?view=html">带说明的页面</a> 或给订阅 URL 加 <code>?view=html</code>。</div><p>管理页（需密码）：<a href="https://${currentDomain}/">https://${currentDomain}/</a></p><div class="row"><div class="label">V2rayN / 小火箭 订阅地址</div><code class="url">${subUrl}</code></div><div class="row"><div class="label">Clash 订阅</div><code class="url">${clashUrl}</code></div><div class="row"><div class="label">Sing-box 订阅</div><code class="url">${singboxUrl}</code></div><p style="font-size:13px;color:#888">节点 UUID：<code>${yourUUID}</code> · 日常用 <strong>Workers-稳定</strong>；ChatGPT/Gemini 用 <strong>-AI</strong> 节点 · Cloudflare 控制台始终直连</p></div></body></html>`;
 }
 
 export default {
