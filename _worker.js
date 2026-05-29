@@ -53,15 +53,22 @@ const WS_READY_STATE_CLOSING = 2;
 const CONNECT_TIMEOUT_MS = 15000;        // 通用连接超时 15s
 const AUTH_CONNECT_TIMEOUT_MS = 25000;   // 认证连接超时 25s
 const DNS_SERVERS = ['8.8.4.4', '1.1.1.1', '8.8.8.8']; // DNS 故障转移列表
+// =====================================================================
+// 路由策略：默认全部 CF 直连（干净IP，不触发验证），仅被CF屏蔽的站点走 ProxyIP
+// =====================================================================
+
+// 【必须走 ProxyIP】— 这些站点明确屏蔽 CF IP，必须通过 ProxyIP 解锁
 const PROXY_REQUIRED_SUFFIXES = [
+    // OpenAI 全家桶
     'openai.com', 'chatgpt.com', 'oaistatic.com', 'oaiusercontent.com', 'openaiapi.com',
-    'chat.openai.com', 'auth0.openai.com',
-    'anthropic.com', 'claude.ai', 'ai.google.dev', 'gemini.google.com', 'bard.google.com',
-    'googleapis.com', 'generativelanguage.googleapis.com', 'alkalimakersuite-pa.clients6.google.com',
+    'chat.openai.com',
+    // Anthropic / Claude
+    'anthropic.com', 'claude.ai',
+    // Google AI
+    'ai.google.dev', 'gemini.google.com', 'bard.google.com',
+    'generativelanguage.googleapis.com', 'alkalimakersuite-pa.clients6.google.com',
+    // Microsoft Copilot
     'copilot.microsoft.com', 'githubcopilot.com',
-    // cursor.sh 不走 ProxyIP — 公共 ProxyIP 是数据中心 IP，触发 Turnstile 验证无法通过
-    // cursor API 走 ProxyIP 解锁
-    'api2.cursor.sh',
 ];
 function closeSocketQuietly(socket) { 
     try { 
@@ -176,33 +183,111 @@ const DIRECT_ONLY_SUFFIXES = [
     'gstatic.com', 'googleusercontent.com', 'ggpht.com',
 ];
 
-/** OpenAI 认证全路径（log-in、oauth/authorize、log-in-or-create-account、Codex CLI）：国内 proxy 优先，直连兜底 */
+/** OpenAI 认证全路径：ProxyIP 优先，直连兜底 */
 const AUTH_PROXY_FIRST_SUFFIXES = ['auth.openai.com', 'auth0.openai.com'];
 
-/** 直连优先、ProxyIP 兜底 — 这些站点走 ProxyIP 会触发 Turnstile 人机验证，直连优先避免 */
+/**
+ * 【直连优先列表】— 走 ProxyIP 会触发验证/被屏蔽的站点
+ * 这些站点不需要解锁，直连 IP 更干净、更稳定
+ */
 const DIRECT_FIRST_SUFFIXES = [
+    // ===== 开发者工具 =====
     'cursor.sh', 'authenticator.cursor.sh', 'cursor.com',
-    'github.com', 'githubusercontent.com',
+    'github.com', 'githubusercontent.com', 'github.io', 'githubassets.com',
+    'gitlab.com', 'bitbucket.org',
+    'npmjs.com', 'npmjs.org', 'yarnpkg.com',
+    'stackoverflow.com', 'stackexchange.com', 'serverfault.com',
+    'python.org', 'pypi.org', 'readthedocs.io', 'docs.rs',
+    'docker.com', 'hub.docker.com',
+    'medium.com', 'dev.to',
+    'huggingface.co',
+    'vercel.com', 'netlify.com', 'railway.app', 'render.com',
+    'codepen.io', 'jsfiddle.net', 'replit.com',
+    // ===== 社交媒体 =====
+    'twitter.com', 'x.com', 't.co', 'twimg.com',
+    'facebook.com', 'fbcdn.net', 'instagram.com', 'whatsapp.com',
+    'reddit.com', 'redd.it', 'redditstatic.com',
+    'linkedin.com', 'licdn.com',
+    'discord.com', 'discord.gg', 'discordapp.com', 'discordapp.net',
+    'telegram.org', 't.me',
+    'youtube.com', 'youtu.be', 'ytimg.com', 'youtubei.googleapis.com',
+    'tiktok.com', 'musical.ly',
+    'pinterest.com', 'pinimg.com',
+    'tumblr.com',
+    'snapchat.com',
+    'twitch.tv', 'ttvnw.net', 'jtvnw.net',
+    // ===== 搜索/邮箱/工具 =====
+    'google.com', 'google.co.jp', 'google.co.kr', 'google.hk',
+    'gstatic.com', 'googleapis.com',
+    'gmail.com',
+    'wikipedia.org', 'wikimedia.org',
+    'notion.so', 'notion.site',
+    'figma.com',
+    'airtable.com',
+    'trello.com', 'atlassian.com',
+    'slack.com', 'slackb.com',
+    'zoom.us',
+    'dropbox.com',
+    'drive.google.com',
+    'docs.google.com', 'sheets.google.com', 'slides.google.com',
+    // ===== 电商 =====
+    'amazon.com', 'amazon.co.jp', 'amazonaws.com',
+    'ebay.com', 'etsy.com', 'shopify.com',
+    // ===== 流媒体 =====
+    'netflix.com', 'nflxvideo.net', 'nflxso.net',
+    'spotify.com', 'scdn.co',
+    'disneyplus.com',
+    'hulu.com',
+    'hbomax.com',
+    'apple.com', 'mzstatic.com',
+    // ===== 新闻/媒体 =====
+    'nytimes.com', 'bbc.com', 'cnn.com', 'reuters.com',
+    'theguardian.com', 'washingtonpost.com',
+    'wsj.com', 'bloomberg.com',
+    'ft.com', 'economist.com',
+    // ===== AI 工具（不需要解锁的） =====
+    'perplexity.ai',
+    'poe.com',
+    'character.ai',
+    // ===== 其他 =====
+    'cloudflare.com', 'one.one.one.one',
+    'mozilla.org', 'firefox.com',
+    'microsoft.com', 'office.com', 'live.com',
+    'adobe.com',
+    'canva.com',
+    'patreon.com',
+    'stripe.com',
+    'paypal.com',
+    'wikipedia.org',
 ];
 
-/** 国内网站直连列表 — 这些站点从国内直连更快，无需走 ProxyIP */
+/** 国内网站直连列表 — 从 CF 边缘直连更快，无需走 ProxyIP */
 const CHINA_DIRECT_SUFFIXES = [
     // 国内主流
     'baidu.com', 'bilibili.com', 'qq.com', 'taobao.com', 'tmall.com', 'jd.com',
     'alipay.com', '163.com', '126.com', 'weibo.com', 'zhihu.com', 'douyin.com',
     'douban.com', 'csdn.net', 'aliyun.com', 'tencent.com', 'weixin.qq.com',
     'baiducontent.com', 'bdimg.com', 'bdstatic.com',
+    'toutiao.com', 'xiaohongshu.com', 'xhscdn.com',
+    'meituan.com', 'dianping.com',
+    'ele.me', 'eleme.cn',
+    'zhihuishu.com', 'chaoxing.com',
     // 视频/音乐
     'iqiyi.com', 'youku.com', 'mgtv.com', 'le.com', 'pptv.com',
     'music.163.com', 'y.qq.com', 'kugou.com', 'kuwo.cn',
+    'acfun.cn',
     // 新闻/资讯
     'sina.com.cn', 'sohu.com', 'ifeng.com', 'thepaper.cn',
+    '36kr.com', 'ithome.com', 'cnbeta.com',
     // 云/工具
     'aliyuncs.com', 'qiniucdn.com', 'qiniudn.com',
+    'gitee.com',
     // 政府/教育
     'gov.cn', 'edu.cn',
     // 直播
     'huya.com', 'douyu.com', 'cc.163.com',
+    // 游戏
+    'steamcontent.com', 'microsoft.com',
 ];
 
 function hostMatchesSuffixList(hostname, suffixList) {
@@ -872,11 +957,16 @@ async function forwardataTCP(host, portNum, rawData, ws, respHeader, remoteConnW
         return;
     }
 
-    // 其他站点：直连优先，proxy 兜底
+    // 其他站点：CF 直连（干净 IP，不触发验证）；不走 ProxyIP 避免数据中心脏 IP
     try {
-        await connectViaDirect(CONNECT_TIMEOUT_MS, connectViaProxy);
+        await connectViaDirect(CONNECT_TIMEOUT_MS, null);
     } catch (err) {
-        await connectViaProxy();
+        // 直连失败说明站点可能屏蔽了 CF IP，此时才尝试 ProxyIP
+        try {
+            await connectViaProxy();
+        } catch (proxyErr) {
+            throw err;
+        }
     }
 }
 
