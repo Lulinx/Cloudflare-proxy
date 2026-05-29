@@ -59,7 +59,9 @@ const PROXY_REQUIRED_SUFFIXES = [
     'anthropic.com', 'claude.ai', 'ai.google.dev', 'gemini.google.com', 'bard.google.com',
     'googleapis.com', 'generativelanguage.googleapis.com', 'alkalimakersuite-pa.clients6.google.com',
     'copilot.microsoft.com', 'githubcopilot.com',
-    'cursor.sh', 'cursor.com', 'api2.cursor.sh',
+    // cursor.sh 不走 ProxyIP — 公共 ProxyIP 是数据中心 IP，触发 Turnstile 验证无法通过
+    // cursor API 走 ProxyIP 解锁
+    'api2.cursor.sh',
 ];
 function closeSocketQuietly(socket) { 
     try { 
@@ -164,6 +166,7 @@ function isSpeedTestSite(hostname) {
 const CLOUDFLARE_DIRECT_SUFFIXES = [
     'cloudflare.com', 'cloudflare.net', 'cloudflare-dns.com', 'cloudflarestatus.com',
     'cloudflareinsights.com', 'workers.dev', 'pages.dev', 'turnstile.com',
+    'challenges.cloudflare.com',
 ];
 
 /** Google OAuth 登录页：仅这些域名 CF 直连（避免 SSL 握手错误）；Gemini/API 走 PROXYIP */
@@ -175,6 +178,12 @@ const DIRECT_ONLY_SUFFIXES = [
 
 /** OpenAI 认证全路径（log-in、oauth/authorize、log-in-or-create-account、Codex CLI）：国内 proxy 优先，直连兜底 */
 const AUTH_PROXY_FIRST_SUFFIXES = ['auth.openai.com', 'auth0.openai.com'];
+
+/** 直连优先、ProxyIP 兜底 — 这些站点走 ProxyIP 会触发 Turnstile 人机验证，直连优先避免 */
+const DIRECT_FIRST_SUFFIXES = [
+    'cursor.sh', 'authenticator.cursor.sh', 'cursor.com',
+    'github.com', 'githubusercontent.com',
+];
 
 /** 国内网站直连列表 — 这些站点从国内直连更快，无需走 ProxyIP */
 const CHINA_DIRECT_SUFFIXES = [
@@ -217,8 +226,12 @@ function isChinaDirectHost(hostname) {
     return hostMatchesSuffixList(hostname, CHINA_DIRECT_SUFFIXES);
 }
 
+function isDirectFirstHost(hostname) {
+    return hostMatchesSuffixList(hostname, DIRECT_FIRST_SUFFIXES);
+}
+
 function requiresProxyHost(hostname) {
-    if (isDirectOnlyHost(hostname) || isAuthProxyFirstHost(hostname) || isChinaDirectHost(hostname)) return false;
+    if (isDirectOnlyHost(hostname) || isAuthProxyFirstHost(hostname) || isChinaDirectHost(hostname) || isDirectFirstHost(hostname)) return false;
     return hostMatchesSuffixList(hostname, PROXY_REQUIRED_SUFFIXES);
 }
 
@@ -829,6 +842,17 @@ async function forwardataTCP(host, portNum, rawData, ws, respHeader, remoteConnW
     if (isChinaDirectHost(host)) {
         await connectViaDirect(CONNECT_TIMEOUT_MS, null);
         return;
+    }
+
+    // Cursor/GitHub 等：直连优先，ProxyIP 兜底（走 ProxyIP 会触发 Turnstile 验证）
+    if (isDirectFirstHost(host) && !forceAllViaProxy) {
+        try {
+            await connectViaDirect(CONNECT_TIMEOUT_MS, null);
+            return;
+        } catch {
+            await connectViaProxy();
+            return;
+        }
     }
 
     // OpenAI 认证：proxyIP 优先（多地址故障转移），直连兜底
