@@ -11,8 +11,8 @@ import { connect } from 'cloudflare:sockets';
 const DEFAULT_CONFIG = {
     password: '11111111',
     uuid: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
-    // 美国解锁 IP 优先；去掉不稳定线路，减少 OpenAI/Gemini 连接失败
-    proxyIP: 'proxyip.us.fxxk.dedyn.io,13.230.34.30',
+    // 多区域 ProxyIP 故障转移：美国(解锁AI)→日本→香港→新加坡→韩国
+    proxyIP: 'proxyip.us.fxxk.dedyn.io,13.230.34.30,proxyip.jp.fxxk.dedyn.io,proxyip.hk.fxxk.dedyn.io,proxyip.sg.fxxk.dedyn.io',
     disableTrojan: false,
 };
 
@@ -25,16 +25,34 @@ let disabletro = DEFAULT_CONFIG.disableTrojan;
 let sessionToken = '';
 const SESSION_COOKIE = 'cf_proxy_auth';
 
-// CDN 优选（仅保留美国线路；订阅时会自动把 Worker 域名作为首节点）
+// CDN 优选（多地区覆盖：香港/日本/新加坡/韩国/美国/台湾/欧洲；订阅时会自动把 Worker 域名作为首节点）
 let cfip = [
-    'yx.kkkong.pp.ua#US-1',
-    'www.visa.com#US-2',
-    'time.cloudflare.com#US-3',
+    // 香港 — 延迟低，国内访问友好
+    'cf.008500.xyz#HK-1',
+    'cf.877774.xyz#HK-2',
+    'cf.zhetengsha.eu.org#HK-3',
+    'saas.sin.fan#HK-4',
+    // 日本 — 稳定，解锁能力强
+    'store.ubi.com#JP-1',
+    'cdns.doon.eu.org#JP-2',
+    'www.visa.com#JP-3',
+    // 新加坡 — 东南亚枢纽
+    'mfa.gov.ua#SG-1',
+    'cf.090227.xyz#SG-2',
+    'yx.kkkong.pp.ua#SG-3',
+    // 韩国 — 低延迟
+    'cf.130519.xyz#KR-1',
+    // 美国 — AI 解锁
+    'time.cloudflare.com#US-1',
+    'icook.hk#US-2',
+    // 台湾
+    'sub.danfeng.eu.org#TW-1',
 ];
 const WS_READY_STATE_OPEN = 1;
 const WS_READY_STATE_CLOSING = 2;
-const CONNECT_TIMEOUT_MS = 20000;
-const AUTH_CONNECT_TIMEOUT_MS = 30000;
+const CONNECT_TIMEOUT_MS = 15000;        // 通用连接超时 15s
+const AUTH_CONNECT_TIMEOUT_MS = 25000;   // 认证连接超时 25s
+const DNS_SERVERS = ['8.8.4.4', '1.1.1.1', '8.8.8.8']; // DNS 故障转移列表
 const PROXY_REQUIRED_SUFFIXES = [
     'openai.com', 'chatgpt.com', 'oaistatic.com', 'oaiusercontent.com', 'openaiapi.com',
     'chat.openai.com', 'auth0.openai.com',
@@ -138,16 +156,7 @@ function parsePryAddress(serverStr) {
 }
 
 function isSpeedTestSite(hostname) {
-    const speedTestDomains = ['speedtest.net','fast.com','speedtest.cn','speed.cloudflare.com', 'ovo.speedtestcustom.com'];
-    if (speedTestDomains.includes(hostname)) {
-        return true;
-    }
-
-    for (const domain of speedTestDomains) {
-        if (hostname.endsWith('.' + domain) || hostname === domain) {
-            return true;
-        }
-    }
+    // 允许测速：不再屏蔽测速站点，用户可以自由测速
     return false;
 }
 
@@ -167,6 +176,26 @@ const DIRECT_ONLY_SUFFIXES = [
 /** OpenAI 认证全路径（log-in、oauth/authorize、log-in-or-create-account、Codex CLI）：国内 proxy 优先，直连兜底 */
 const AUTH_PROXY_FIRST_SUFFIXES = ['auth.openai.com', 'auth0.openai.com'];
 
+/** 国内网站直连列表 — 这些站点从国内直连更快，无需走 ProxyIP */
+const CHINA_DIRECT_SUFFIXES = [
+    // 国内主流
+    'baidu.com', 'bilibili.com', 'qq.com', 'taobao.com', 'tmall.com', 'jd.com',
+    'alipay.com', '163.com', '126.com', 'weibo.com', 'zhihu.com', 'douyin.com',
+    'douban.com', 'csdn.net', 'aliyun.com', 'tencent.com', 'weixin.qq.com',
+    'baiducontent.com', 'bdimg.com', 'bdstatic.com',
+    // 视频/音乐
+    'iqiyi.com', 'youku.com', 'mgtv.com', 'le.com', 'pptv.com',
+    'music.163.com', 'y.qq.com', 'kugou.com', 'kuwo.cn',
+    // 新闻/资讯
+    'sina.com.cn', 'sohu.com', 'ifeng.com', 'thepaper.cn',
+    // 云/工具
+    'aliyuncs.com', 'qiniucdn.com', 'qiniudn.com',
+    // 政府/教育
+    'gov.cn', 'edu.cn',
+    // 直播
+    'huya.com', 'douyu.com', 'cc.163.com',
+];
+
 function hostMatchesSuffixList(hostname, suffixList) {
     if (!hostname) return false;
     const h = hostname.toLowerCase();
@@ -184,8 +213,12 @@ function isAuthProxyFirstHost(hostname) {
     return hostMatchesSuffixList(hostname, AUTH_PROXY_FIRST_SUFFIXES);
 }
 
+function isChinaDirectHost(hostname) {
+    return hostMatchesSuffixList(hostname, CHINA_DIRECT_SUFFIXES);
+}
+
 function requiresProxyHost(hostname) {
-    if (isDirectOnlyHost(hostname) || isAuthProxyFirstHost(hostname)) return false;
+    if (isDirectOnlyHost(hostname) || isAuthProxyFirstHost(hostname) || isChinaDirectHost(hostname)) return false;
     return hostMatchesSuffixList(hostname, PROXY_REQUIRED_SUFFIXES);
 }
 
@@ -786,9 +819,15 @@ async function forwardataTCP(host, portNum, rawData, ws, respHeader, remoteConnW
         connectStreams(initialSocket, ws, respHeader, streamRetry);
     }
 
-    // Google：仅 CF 直连
+    // Google/CF 控制台：仅 CF 直连
     if (isDirectOnlyHost(host)) {
         await connectViaDirect(AUTH_CONNECT_TIMEOUT_MS, null);
+        return;
+    }
+
+    // 国内网站：CF 直连（国内站点从 CF 边缘直连更快，无需绕 ProxyIP）
+    if (isChinaDirectHost(host)) {
+        await connectViaDirect(CONNECT_TIMEOUT_MS, null);
         return;
     }
 
@@ -918,30 +957,35 @@ async function connectStreams(remoteSocket, webSocket, headerData, retryFunc) {
 }
 
 async function forwardataudp(udpChunk, webSocket, respHeader) {
-    try {
-        const tcpSocket = connect({ hostname: '8.8.4.4', port: 53 });
-        let vlessHeader = respHeader;
-        const writer = tcpSocket.writable.getWriter();
-        await writer.write(udpChunk);
-        writer.releaseLock();
-        await tcpSocket.readable.pipeTo(new WritableStream({
-            async write(chunk) {
-                if (webSocket.readyState === WS_READY_STATE_OPEN) {
-                    if (vlessHeader) { 
-                        const response = new Uint8Array(vlessHeader.length + chunk.byteLength);
-                        response.set(vlessHeader, 0);
-                        response.set(chunk, vlessHeader.length);
-                        webSocket.send(response.buffer);
-                        vlessHeader = null; 
-                    } else { 
-                        webSocket.send(chunk); 
+    let lastError = null;
+    for (const dns of DNS_SERVERS) {
+        try {
+            const tcpSocket = connect({ hostname: dns, port: 53 });
+            let vlessHeader = respHeader;
+            const writer = tcpSocket.writable.getWriter();
+            await writer.write(udpChunk);
+            writer.releaseLock();
+            await tcpSocket.readable.pipeTo(new WritableStream({
+                async write(chunk) {
+                    if (webSocket.readyState === WS_READY_STATE_OPEN) {
+                        if (vlessHeader) {
+                            const response = new Uint8Array(vlessHeader.length + chunk.byteLength);
+                            response.set(vlessHeader, 0);
+                            response.set(chunk, vlessHeader.length);
+                            webSocket.send(response.buffer);
+                            vlessHeader = null;
+                        } else {
+                            webSocket.send(chunk);
+                        }
                     }
-                }
-            },
-        }));
-    } catch (error) {
-        // console.error('UDP forward error:', error);
+                },
+            }));
+            return; // 成功即返回
+        } catch (error) {
+            lastError = error;
+        }
     }
+    // 所有 DNS 服务器均失败，静默处理
 }
 
 function parseCookies(cookieHeader) {
